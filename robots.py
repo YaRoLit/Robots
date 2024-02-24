@@ -13,7 +13,7 @@ class Robots:
         self.speed_limit = speed     # Скоростной лимит
         self.leftside_speed = 0      # Угловая скорость двигателей левого борта
         self.rightside_speed = 0     # Угловая скорость двигателей правого борта
-        self.goal_point = None       # Целевая точка движения робота 
+        self.goal_point = (np.NAN, np.NAN)    # Целевая точка движения робота 
         self.__start_time = time.time()   # Время создания экземпляра
         self.__action = 0            # Флаг состояния робота
         self.__box_coords = None     # Координаты и размер ограничивающейй рамки
@@ -27,7 +27,8 @@ class Robots:
             self.rightside_speed,    #
             self.__action,           #
             self.__angle_track,      #
-            #self.goal_point
+            self.goal_point[0],      # Координата x целевой точки
+            self.goal_point[1],      # Координата y целевой точки
         ]])
 
 
@@ -66,7 +67,6 @@ class Robots:
             self.__rotate_coef = self.speed_limit * self.__calc_sign(self.__angle_track)
         else:
             self.__rotate_coef = round(self.__angle_track / 45 * self.speed_limit, 2)
-        #print(self.__angle_track, self.__rotate_coef, self.__action, self.__box_coords, self.goal_point)
         if self.__rotate_coef > 0:
             return (0, abs(self.__rotate_coef))
         else:
@@ -106,21 +106,32 @@ class Robots:
 
     def robot_action(self) -> tuple:
         '''Робот движется по рассчитанному ранее маршруту'''
+        if self.goal_point != (self.__history[-1][-2], self.__history[-1][-1]):
+            # Проверка, что целевая точка изменилась для разворота на месте
+            # Только для типов робота с бортовым приводом, по keypoints
+            pass
         if self.__check_distance(
             self.__box_coords, self.goal_point) < 20:
             self.__action = 0
             return self.robot_stop()
         else:
             self.__action = 1
-            return self.robot_move_straight()
+            return self.robot_move_forward()
 
 
-    def robot_move_straight(self) -> None:
-        '''Робот едет прямо'''
-        # Определяем коэффициенты подруливания для каждого борта отдельно
+    def robot_move_forward(self) -> None:
+        '''Робот едет вперед'''
         leftside_coef, rightside_coef = self.__calc_rotate_coef()
         self.leftside_speed = round((self.speed_limit - leftside_coef), 2)
         self.rightside_speed = round((-self.speed_limit + rightside_coef), 2)
+
+        return self.leftside_speed, self.rightside_speed
+
+
+    def robot_move_backward(self) -> None:
+        '''Робот едет назад'''
+        # Пока только заготовка, не работает
+        pass
 
         return self.leftside_speed, self.rightside_speed
 
@@ -143,7 +154,8 @@ class Robots:
             self.rightside_speed,    # Скорость двигателей правого борта
             self.__action,           # Тип активности
             self.__angle_track,      # Угол по движению
-            #self.goal_point          # Целевая точка
+            self.goal_point[0],      # Координата x целевой точки
+            self.goal_point[1],      # Координата y целевой точки
             ]], axis=0)
         # Если строк более 400, убираем первую
         if len(self.__history) > 400:
