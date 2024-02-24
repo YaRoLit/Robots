@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import cv2
@@ -44,16 +45,18 @@ def coppeliasim_remoteAPI() -> None:
     frontright_motor = sim.getObject('./front_right_wheel')
     backleft_motor = sim.getObject('./back_left_wheel')
     backright_motor = sim.getObject('./back_right_wheel')
-    Cam_Handle = sim.getObject('./Mast/Cam')
+    Cam_Handle = sim.getObject('./building/cam_1')
     # Запускаем симуляцию и цикл управления объектами сцены
     sim.startSimulation()
-    #fourcc = cv2.VideoWriter_fourcc(*'MP4V')
-    #out = cv2.VideoWriter('output.mp4', fourcc, 30.0, (800, 800))
+    #fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    #out = cv2.VideoWriter('output.avi', fourcc, 15.0, (1280, 960))
     while run_flag:
         img, res = sim.getVisionSensorImg(Cam_Handle)
         img_RGB = np.frombuffer(img, dtype=np.uint8).reshape(res[1], res[0], 3)
         frame = img_RGB[::-1, :, :]
+        # Меняем цветовые форматы для корректного отображения
         img_BGR = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # Рисуем целеуказатель
         cv2.circle(img_BGR, goal_point, 2, (0, 0, 255), 2)
         cv2.imshow('frame', img_BGR)
         #out.write(img_BGR)
@@ -69,26 +72,35 @@ def coppeliasim_remoteAPI() -> None:
     cv2.destroyAllWindows()
 
 
-def process_video() -> None:
+def detect_objects() -> None:
     '''
     Отдельный процесс, отвечающий за обнаружение координат всех объектов в кадре
     с помощью предобученной модели и трансляцию в виде глобальных переменных.
     Должен работать на GPU.
     '''
     global frame
-    global results
+    global boxes
     global run_flag
     # Автоматический выбор устройства. Крайне рекомендуется иметь CUDA.
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Загрузка модели YOLO
-    model = YOLO('./Models/pose.pt')
+    model = YOLO('detect.pt')
+    #robot_1 = robots.Robots()
     # Запуск цикла обработки видеопотока
     while run_flag:
-        # Обрабатываем кадр, ищем объекты
-        results = model(frame, device=device, verbose=False)
+        #start_time = time.time()
+        # Обрабатываем кадр, ищем объекты, возвращаем boxes
+        results = model.track(frame,
+                              device=device,
+                              verbose=False,
+                              max_det=1,
+                              imgsz=640)
+        if results:
+            boxes = results[0].boxes
+        #print(time.time() - start_time)
 
 
-def crash_watchdog() -> None:
+def collision_watchdog() -> None:
     '''
     Заготовка для отдельного процесса, который препятствует ситуациям столкновения
     отслеживаемых объектов между собой при выполнении операций. Получает результаты
@@ -106,21 +118,21 @@ def robot_movement_proc() -> None:
     '''
     global leftside_speed
     global rightside_speed
-    global results
+    global boxes
     global run_flag
     # Создаем экземпляр класса "робот", классы введены для поддержки нескольких
     # роботов на одной сцене, для каждого отдельного робота создается экземпляр
-    robot_1 = robots.Robots(speed=4)
+    robot_1 = robots.Robots(speed=8)
     # Переменная для счетчика кадров, в которых робот не обнаружен
     missed_frames_cnt = 0
     # Основной цикл управления роботом
     while run_flag:
         # Если робота "не видно" 10+ кадров, останавливаем его
-        if missed_frames_cnt > 10:
+        if missed_frames_cnt > 4:
             leftside_speed = 0
             rightside_speed = 0
         # Робот ищет свои координаты в результатах обработки кадра моделью
-        if robot_1.find_itself(results=results):
+        if robot_1.find_itself(boxes=boxes):
             missed_frames_cnt = 0
         else:
             missed_frames_cnt += 1
@@ -128,13 +140,15 @@ def robot_movement_proc() -> None:
         # Передаем роботу координаты целевой точки, строим маршрут
         # Если робот успешно построил маршрут, он двигается по нему
         if robot_1.find_way(goal_point):
-            leftside_speed, rightside_speed = robot_1.robot_action()
-            print(leftside_speed, rightside_speed)
+            try:
+                leftside_speed, rightside_speed = robot_1.robot_action()
+            except Exception as e:
+                print(e)
 
 
 run_flag = True         # флаг для остановки программы
 frame = None            # переменная для передачи текущего кадра с виртуальной камеры
-results = None          # переменная для трансляции результатов
+boxes = None            # переменная для трансляции результатов
 goal_point = None       # Координаты целевой точки
 leftside_speed = 0      # скорость колес левого борта
 rightside_speed = 0     # скорость колес правого борта
@@ -143,12 +157,12 @@ rightside_speed = 0     # скорость колес правого борта
 # Запуск модулей в параллельных процессах
 with ThreadPoolExecutor(max_workers=4) as executor:
     coppeliasim_task = executor.submit(coppeliasim_remoteAPI)
-    video_processing = executor.submit(process_video)
-    #crash_watchdog_ = executor.submit(crash_watchdog)
+    objects_detecting = executor.submit(detect_objects)
+    #crash_watchdog = executor.submit(collision_watchdog)
     robot_processing = executor.submit(robot_movement_proc)
 
     # Результаты работы модулей после остановки
     print(coppeliasim_task.result())
-    print(video_processing.result())
-    #print(crash_watchdog_.result())
+    print(objects_detecting.result())
+    #print(crash_watchdog.result())
     print(robot_processing.result())

@@ -19,8 +19,6 @@ class Robots:
         self.__box_coords = None     # Координаты и размер ограничивающейй рамки
         self.__angle_track = 0       # Угол отклонения по вектору движения
         self.__rotate_coef = 0       # Коэффициент подруливания в движении
-        self.__direction_vec = None     # Вектор направления робота по keypoints
-        self.__angle_kp = 0          # Угол отклонения по контрольным точкам
         self.__history = np.array([[ # История перемещений робота
             time.time() - self.__start_time,   # Временная метка от старта
             np.NAN,                  # Координата x трекинга
@@ -29,7 +27,7 @@ class Robots:
             self.rightside_speed,    #
             self.__action,           #
             self.__angle_track,      #
-            self.__angle_kp          #
+            #self.goal_point
         ]])
 
 
@@ -57,37 +55,22 @@ class Robots:
         return int(distance)
 
 
-    def __calc_boundingbox_midpoint(self) -> tuple:
-        '''Отслеживаем изменения центральной точки ограничивающей рамки'''
-        # Предполагалось, что трекинг будет по центральной точке рамки
-        center_points = (
-            ((self.__box_coords[0][0] + self.__box_coords[0][2]) // 2),
-            ((self.__box_coords[0][1] + self.__box_coords[0][3]) // 2))
-
-        return center_points
-
-
     def __calc_rotate_coef(self) -> tuple:
         '''Вычисляем коэффициент "подруливания" в движении'''
-        # Эта проверка нужна чтобы избежать непонятных вылетов,
-        # нужно разобраться в их причине и убрать её
-        try:
-            track = ((self.__history[-1][1:3]), (self.__history[-2][1:3]))
-        # Проверяем, что смещение центральной точки не равно 0 (робот сместился)
-            #if not np.array_equal(track[0], track[1]):
-            if self.__check_distance(track[0], track[1]) > 1:
-                # Определяем угол отклонения между вектором смещения и целевым
+        for reverse in self.__history[::-1]:
+            track = self.__history[-1][1:3], reverse[1:3]
+            if self.__check_distance(track[0], track[1]) > 4:
                 self.__angle_track = self.__calc_angle(track, self.goal_point)
-                angle = self.__angle_track if abs(self.__angle_track) > 45 else 45
-                # Затем по углу определяем коэффициент подруливания
-                self.__rotate_coef = (angle / 45) * self.speed_limit
-        except Exception:
-            return (0, 0)
-        # В зависимости от знака коэффициента применяем его к нужному борту
-        if self.__rotate_coef > 0:
-            return (0, self.__rotate_coef)
+                break
+        if abs(self.__angle_track) > 45:
+            self.__rotate_coef = self.speed_limit * self.__calc_sign(self.__angle_track)
         else:
-            return (self.__rotate_coef, 0) 
+            self.__rotate_coef = round(self.__angle_track / 45 * self.speed_limit, 2)
+        #print(self.__angle_track, self.__rotate_coef, self.__action, self.__box_coords, self.goal_point)
+        if self.__rotate_coef > 0:
+            return (0, abs(self.__rotate_coef))
+        else:
+            return (abs(self.__rotate_coef), 0)
 
 
     def __calc_sign(self, num: float) -> int:
@@ -96,23 +79,16 @@ class Robots:
         return -1 if num < 0 else 1
 
 
-    def find_itself(self, results) -> bool:
+    def find_itself(self, boxes) -> bool:
         '''Ищем в результатах обработки моделью кадра координаты робота'''
-        if results:
-            for result in results:
-                # Тут нужно сделать выбор конкретного класса робота по self.model
-                # нужно подумать над введением идентификаторов для одинаковых моделей
-                boxes = result.boxes
-                keypoints = result.keypoints
-            # Если вектор с контрольными точками не пустой
-            if keypoints[0].shape == (1, 2, 2):
-                self.__direction_vec = keypoints[0].xy.cpu().numpy().astype(np.int16)
-                self.__box_coords = boxes.xyxy.cpu().numpy().astype(np.int16)
-                return True
-            else:
-                return False
-        else:
-            print()    # Магический принт, без него не работает
+        # пока ищем по классу 0, потом нужно будет добавить идентификаторы
+        try:
+            robot_box = boxes[boxes.cls==0].cpu().numpy()
+            self.__box_coords = robot_box.xywh[0]
+            self.__add_history()
+            return True
+        except Exception as e:
+            print(e)
             return False
 
 
@@ -130,59 +106,21 @@ class Robots:
 
     def robot_action(self) -> tuple:
         '''Робот движется по рассчитанному ранее маршруту'''
-        # Проверяем условия перехода в состояния:
-        # - остановка (self.__action=0)
-        # - прямолинейное движение с подруливанием (self.__action=1)
-        # - разворот на месте (self.__action=-1)
-        # ----------------------------------------------------------
-        # Вычисляем угол отклонения от вектора до цели по ключевым точкам робота
-        print(self.__angle_kp)
-        self.__angle_kp = self.__calc_angle(self.__direction_vec[0],
-                                            self.goal_point)
-        # Если угол отклонения +-45 градусов, поднимаем флаг разворота на месте
-        if abs(self.__angle_kp) > 45:
-            self.__action = -1
-        # Если флаг разворота поднят, разворачиваемся
-        if self.__action == -1:
-            self.robot_rotate()
-        # Здесь проверяем условие достижения целевой точки и останавливаемся
-        elif self.__check_distance(
-            self.__direction_vec[0][1], self.goal_point) < 20:
+        if self.__check_distance(
+            self.__box_coords, self.goal_point) < 20:
             self.__action = 0
-            self.robot_stop()
-        # Если не разворот и не остановка, значит едем прямо
+            return self.robot_stop()
         else:
             self.__action = 1
-            self.robot_move_straight()
-
-        return self.leftside_speed, self.rightside_speed
+            return self.robot_move_straight()
 
 
     def robot_move_straight(self) -> None:
         '''Робот едет прямо'''
         # Определяем коэффициенты подруливания для каждого борта отдельно
         leftside_coef, rightside_coef = self.__calc_rotate_coef()
-        self.leftside_speed = round((self.speed_limit + leftside_coef), 2)
+        self.leftside_speed = round((self.speed_limit - leftside_coef), 2)
         self.rightside_speed = round((-self.speed_limit + rightside_coef), 2)
-        self.__add_history()
-
-        return self.leftside_speed, self.rightside_speed
-
-
-    def robot_rotate(self) -> None:
-        '''Робот разворачивается на месте'''
-        # Смотрим текущий знак угла отклонения от вектора к целевой точке
-        sign = self.__calc_sign(self.__angle_kp)
-        # Если знаки углов текущей и прошлой итерации отличаются,
-        # значит робот перескочил через 0, флаг состояния переводится
-        # в значение (1), то есть движение прямо
-        if sign != self.__calc_sign(self.__history[-1][-1]):
-            self.__action = 1
-        # Скорость разворота замедляется в секторе +-45 градусов от goal_vector
-        rotate_coef = 1 if abs(self.__angle_kp) < 45 else self.speed_limit
-        self.leftside_speed = sign * rotate_coef
-        self.rightside_speed = sign * rotate_coef
-        self.__add_history()
 
         return self.leftside_speed, self.rightside_speed
 
@@ -191,24 +129,21 @@ class Robots:
         '''Робот остановлен'''
         self.leftside_speed = 0
         self.rightside_speed = 0
-        #print(self.__history[-1][0])
 
         return self.leftside_speed, self.rightside_speed
     
 
     def __add_history(self) -> None:
         '''Добавляем запись истории для каждой итерации движения и поворота'''
-        # Делаем трекинг по keypoints[1]
-        track = self.__direction_vec[0][1]
         self.__history = np.append(self.__history,[[
             time.time() - self.__start_time,    # Время от старта
-            track[0],                # Координата x трекинга
-            track[1],                # Координата y трекинга
+            self.__box_coords[0],    # Координата x трекинга
+            self.__box_coords[1],    # Координата y трекинга
             self.leftside_speed,     # Скорость двигателей левого борта
             self.rightside_speed,    # Скорость двигателей правого борта
             self.__action,           # Тип активности
             self.__angle_track,      # Угол по движению
-            self.__angle_kp          # Угол по контрольным точкам
+            #self.goal_point          # Целевая точка
             ]], axis=0)
         # Если строк более 400, убираем первую
         if len(self.__history) > 400:
