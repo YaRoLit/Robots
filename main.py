@@ -140,10 +140,7 @@ def robot_movement_proc() -> None:
         # Передаем роботу координаты целевой точки, строим маршрут
         # Если робот успешно построил маршрут, он двигается по нему
         if robot_1.find_way(goal_point):
-            try:
-                leftside_speed, rightside_speed = robot_1.robot_action()
-            except Exception as e:
-                print(e)
+            leftside_speed, rightside_speed = robot_1.robot_action()
 
 
 run_flag = True         # флаг для остановки программы
