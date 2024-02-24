@@ -84,7 +84,7 @@ def detect_objects() -> None:
     # Автоматический выбор устройства. Крайне рекомендуется иметь CUDA.
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Загрузка модели YOLO
-    model = YOLO('detect.pt')
+    model = YOLO('./Models/detect.pt')
     #robot_1 = robots.Robots()
     # Запуск цикла обработки видеопотока
     while run_flag:
