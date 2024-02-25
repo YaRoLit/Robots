@@ -160,6 +160,7 @@ def robot_movement_proc() -> None:
         else:
             goal_point = None
             leftside_speed, rightside_speed = (0, 0)
+    # Выводим последние 400 записей истории
     robot_1.show_history()
 
 

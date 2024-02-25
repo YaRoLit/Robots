@@ -17,15 +17,17 @@ class Robots:
         self.goal_point = np.array([np.NAN, np.NAN])    # Целевая точка 
         self.__start_time = time.time()   # Время создания экземпляра
         self.__action = 0            # Флаг состояния робота
-        self.__box_coords = None     # Координаты и размер ограничивающей рамки
-        self.__keypoints_vec = None     # Вектор направления по ключевым точкам
+        self.__box_coords = np.array(
+            [np.NAN, np.NAN, np.NAN, np.NAN])
+        self.__keypoints_vec = np.array( # Вектор направления по ключевым точкам
+            [np.NAN, np.NAN])
         self.__angle_keypoints = 0   # Угол отклонения по ключеввым точкам
         self.__angle_track = 0       # Угол отклонения по вектору движения
         self.__rotate_coef = 0       # Коэффициент подруливания в движении
         self.__history = np.array([[ # История перемещений робота
             time.time() - self.__start_time,   # Временная метка от старта
-            np.NAN,                  # Координата x трекинга
-            np.NAN,                  # Координата y трекинга
+            self.__box_coords[0],    # Координата x трекинга
+            self.__box_coords[1],    # Координата y трекинга
             self.leftside_speed,     #
             self.rightside_speed,    #
             self.__action,           #
@@ -36,7 +38,7 @@ class Robots:
         ]])
 
 
-    def __calc_angle(self, dir_vec: tuple, goal_point: tuple) -> int:
+    def __calc_angle(self, dir_vec: np.array, goal_point: np.array) -> int:
         '''
         Вычисляем угол между вектором направления и вектором
         до целевой точки. Вектор направления передается целиком,
@@ -51,18 +53,11 @@ class Robots:
         return round(angle)
 
 
-    def __check_distance(self, point_1: tuple, point_2: tuple) -> int:
-        '''Вычислем длину вектора между двумя точками'''
-        distance = ((point_1[0] - point_2[0]) ** 2 +
-                    (point_1[1] - point_2[1]) ** 2) ** 0.5
-        return int(distance)
-
-
     def __calc_rotate_coef(self) -> tuple:
         '''Вычисляем коэффициент "подруливания" в движении'''
         for reverse in self.__history[::-1]:
             track = self.__history[-1][1:3], reverse[1:3]
-            if self.__check_distance(track[0], track[1]) > 4:
+            if np.linalg.norm(track[0] - track[1]) > 4:
                 self.__angle_track = self.__calc_angle(track, self.goal_point)
                 break
         if abs(self.__angle_track) > 45:
@@ -87,12 +82,9 @@ class Robots:
             y_max = np.max(itemindex[0][:])
             x_min = np.min(itemindex[1][:])
             x_max = np.max(itemindex[1][:])
+            return (x_min + x_max) // 2, (y_min + y_max) // 2
         except:
-            y_min = 0
-            y_max = 0
-            x_min = 0
-            x_max = 0    
-        return (x_min + x_max) // 2, (y_min + y_max) // 2
+            return 0, 0
     
 
     def __find_keypoints(self, robot_roi: np.array) -> tuple:
@@ -102,34 +94,33 @@ class Robots:
         lower_yellow = np.array([20, 100, 100])
         upper_yellow = np.array([40, 255, 255])
         mask_yellow = cv2.inRange(img_HSV, lower_yellow, upper_yellow)
-        itemindex = np.where(mask_yellow != 0)
-        x_head, y_head = self.__find_center(itemindex)
+        x_head, y_head = self.__find_center(np.where(mask_yellow != 0))
         # Ищу ключевую точку "хвоста" по синей метке
         lower_blue = np.array([100, 150, 0])
         upper_blue = np.array([140, 255, 255])
         mask_blue = cv2.inRange(img_HSV, lower_blue, upper_blue)
-        itemindex = np.where(mask_blue != 0)
-        x_tail, y_tail = self.__find_center(itemindex)
+        x_tail, y_tail = self.__find_center(np.where(mask_blue != 0))
         return x_head, y_head, x_tail, y_tail
 
 
     def find_keypoints_vec(self, frame) -> bool:
         ''''Определяем вектор направления по ключевым точкам'''
+        # Переделать на поиск ключевых точек моделью YOLO keypoints
         try:
             # вырезаю робота по ограничительной рамке
             x, y, w, h = self.__box_coords
             # ищу ключевые точки по цветовым меткам
             robot_roi = frame[y-h//2:y+h//2, x-w//2:x+w//2]
             x_head, y_head, x_tail, y_tail = self.__find_keypoints(robot_roi)
-            x_head = x_head + x-w//2
-            y_head = y_head + y-h//2
-            x_tail = x_tail + x-w//2
-            y_tail = y_tail + y-h//2
-            self.__keypoints_vec = (x_head, y_head), (x_tail, y_tail)
+            x_head = x_head + x - w // 2
+            y_head = y_head + y - h // 2
+            x_tail = x_tail + x - w // 2
+            y_tail = y_tail + y - h // 2
+            self.__keypoints_vec = np.array([[x_head, y_head], [x_tail, y_tail]])
             return True
         except Exception as e:
             print(e)
-            self.__keypoints_vec = None
+            self.__keypoints_vec = np.array([np.NAN, np.NAN])
             return False
 
 
@@ -164,7 +155,7 @@ class Robots:
         # Возвращает False если маршрут построить невозможно, либо
         # если робот достиг целевой точки
         if goal_point:
-            if self.__check_distance(self.__box_coords, goal_point) > 20:
+            if np.linalg.norm(self.__box_coords[0:2] - goal_point) > 20:
                 self.goal_point = np.array(goal_point)
                 return True
             else:
@@ -176,8 +167,7 @@ class Robots:
         '''Робот движется по рассчитанному ранее маршруту'''
         # В момент изменения целевой точки поднимаем флаг
         # разворота на месте. Некрасиво, переделать этот блок
-        if ((self.goal_point[0] != self.__history[-1][-2]) |
-            (self.goal_point[1] != self.__history[-1][-1])):
+        if not np.array_equal(self.goal_point, self.__history[-1][-2:]):
                 self.__angle_keypoints = self.__calc_angle(
                                         self.__keypoints_vec, self.goal_point)
                 self.__add_history()
@@ -200,8 +190,8 @@ class Robots:
         # в значение (1), то есть движение прямо
         if sign != self.__calc_sign(self.__history[-1][-3]):
             self.__action = 1
-        # Скорость разворота замедляется в секторе +-10 градусов от goal_vector
-        rotate_coef = 1 if abs(self.__angle_keypoints) < 10 else self.speed_limit
+        # Скорость разворота замедляется в секторе +-15 градусов от goal_vector
+        rotate_coef = 1 if abs(self.__angle_keypoints) < 15 else self.speed_limit
         self.leftside_speed = sign * rotate_coef
         self.rightside_speed = sign * rotate_coef
         return self.leftside_speed, self.rightside_speed
