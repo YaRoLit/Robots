@@ -32,6 +32,7 @@ def coppeliasim_remoteAPI() -> None:
     Это сделано для имитации каналов дистанционного приема/передачи информации. 
     '''
     global frame
+    global cam_num
     global leftside_speed
     global rightside_speed
     global run_flag
@@ -45,13 +46,17 @@ def coppeliasim_remoteAPI() -> None:
     frontright_motor = sim.getObject('./front_right_wheel')
     backleft_motor = sim.getObject('./back_left_wheel')
     backright_motor = sim.getObject('./back_right_wheel')
-    Cam_Handle = sim.getObject('./building/cam_1')
+    Cam_1_Handle = sim.getObject(f'./building/cam_1')
+    Cam_2_Handle = sim.getObject(f'./building/cam_2')
     # Запускаем симуляцию и цикл управления объектами сцены
     sim.startSimulation()
     #fourcc = cv2.VideoWriter_fourcc(*'XVID')
     #out = cv2.VideoWriter('output.avi', fourcc, 15.0, (1280, 960))
     while run_flag:
-        img, res = sim.getVisionSensorImg(Cam_Handle)
+        if cam_num == 1:
+            img, res = sim.getVisionSensorImg(Cam_1_Handle)
+        elif cam_num == 2:
+            img, res = sim.getVisionSensorImg(Cam_2_Handle)
         img_RGB = np.frombuffer(img, dtype=np.uint8).reshape(res[1], res[0], 3)
         frame = img_RGB[::-1, :, :]
         # Меняем цветовые форматы для корректного отображения
@@ -119,7 +124,10 @@ def robot_movement_proc() -> None:
     global leftside_speed
     global rightside_speed
     global boxes
+    global frame
+    global cam_num
     global run_flag
+    global goal_point
     # Создаем экземпляр класса "робот", классы введены для поддержки нескольких
     # роботов на одной сцене, для каждого отдельного робота создается экземпляр
     robot_1 = robots.Robots(speed=8)
@@ -127,20 +135,32 @@ def robot_movement_proc() -> None:
     missed_frames_cnt = 0
     # Основной цикл управления роботом
     while run_flag:
-        # Если робота "не видно" 10+ кадров, останавливаем его
-        if missed_frames_cnt > 4:
-            leftside_speed = 0
-            rightside_speed = 0
+        # Если робота "не видно" 10+ кадров, вращаем его до сизого дыма
+        if missed_frames_cnt > 10:
+            #robot_1.robot_move_backward()
+            leftside_speed, rightside_speed = 1, 1
         # Робот ищет свои координаты в результатах обработки кадра моделью
         if robot_1.find_itself(boxes=boxes):
             missed_frames_cnt = 0
+            robot_1.find_keypoints_vec(frame=frame)
         else:
             missed_frames_cnt += 1
             continue
+        # Проверяем условия переключения камер и переключаем при необходимости
+        cam_checking = robot_1.check_cam(frame.shape, cam_num)
+        if cam_checking:
+            cam_num = cam_checking
+            continue
         # Передаем роботу координаты целевой точки, строим маршрут
         # Если робот успешно построил маршрут, он двигается по нему
-        if robot_1.find_way(goal_point):
+        if robot_1.find_way(frame=frame, goal_point=goal_point):
             leftside_speed, rightside_speed = robot_1.robot_action()
+        # Если робот достиг целевой точки или маршрут невозможен,
+        # то останавливаем робота и сбрасываем целевую точку
+        else:
+            goal_point = None
+            leftside_speed, rightside_speed = (0, 0)
+    robot_1.show_history()
 
 
 run_flag = True         # флаг для остановки программы
@@ -149,6 +169,7 @@ boxes = None            # переменная для трансляции ре�
 goal_point = None       # Координаты целевой точки
 leftside_speed = 0      # скорость колес левого борта
 rightside_speed = 0     # скорость колес правого борта
+cam_num = 1             # текущая камера
 
 
 # Запуск модулей в параллельных процессах
