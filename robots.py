@@ -1,20 +1,26 @@
 import time
 import numpy as np
 import cv2
+import torch
+from ultralytics import YOLO
+
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class Robots:
     def __init__(self,
-                model='First',
-                type='4X4_side',     # Колесный робот с бортовым приводом
+                model='./Models/pose.pt',
+                robot_type=0,
                 speed=1,
+                start_place=[640, 320]    # roi_zero_point [x, y]
                 ) -> None:
-        self.model = model           # Модель робота
-        self.type = type             # Тип робота (шасси)
+        self.model = YOLO(model)           # Файл модели робота
+        self.robot_type = robot_type    # Тип робота
         self.speed_limit = speed     # Скоростной лимит
         self.leftside_speed = 0      # Угловая скорость двигателей левого борта
         self.rightside_speed = 0     # Угловая скорость двигателей правого борта
-        self.goal_point = np.array([np.NAN, np.NAN])    # Целевая точка 
+        self.goal_point = np.array([[np.NAN, np.NAN], ])    # Массив целевых точек (маршрут) 
         self.__start_time = time.time()   # Время создания экземпляра
         self.__action = 0            # Флаг состояния робота
         self.__box_coords = np.array(
@@ -24,6 +30,7 @@ class Robots:
         self.__angle_keypoints = 0   # Угол отклонения по ключеввым точкам
         self.__angle_track = 0       # Угол отклонения по вектору движения
         self.__rotate_coef = 0       # Коэффициент подруливания в движении
+        self.roi = start_place
         self.__history = np.array([[ # История перемещений робота
             time.time() - self.__start_time,   # Временная метка от старта
             self.__box_coords[0],    # Координата x трекинга
@@ -33,8 +40,8 @@ class Robots:
             self.__action,           #
             self.__angle_track,      #
             self.__angle_keypoints,  #
-            self.goal_point[0],      # Координата x целевой точки
-            self.goal_point[1],      # Координата y целевой точки
+            self.goal_point[0][0],      # Координата x целевой точки
+            self.goal_point[0][1],      # Координата y целевой точки
         ]])
 
 
@@ -55,15 +62,23 @@ class Robots:
 
     def __calc_rotate_coef(self) -> tuple:
         '''Вычисляем коэффициент "подруливания" в движении'''
+        # Ищем координаты такой предыдущей точки в истории,
+        # расстояние до которой от текущей больше 4 пикселей.
+        # Затем строим между ними вектор и вычисляем угол отклонения.
         for reverse in self.__history[::-1]:
             track = self.__history[-1][1:3], reverse[1:3]
-            if np.linalg.norm(track[0] - track[1]) > 4:
-                self.__angle_track = self.__calc_angle(track, self.goal_point)
+            if np.linalg.norm(track[0] - track[1]) > 2:
+                self.__angle_track = self.__calc_angle(track, self.goal_point[0])
                 break
+        # Если отклонение больше 45 градусов, крутим по полной.
         if abs(self.__angle_track) > 45:
-            self.__rotate_coef = self.speed_limit * self.__calc_sign(self.__angle_track)
+            self.__rotate_coef = self.speed_limit * self.__calc_sign(
+                                                            self.__angle_track)
+        # Если меньше 45, то варьируем скорость подруливания от угла.
         else:
-            self.__rotate_coef = round(self.__angle_track / 45 * self.speed_limit, 2)
+            self.__rotate_coef = round(
+                                 self.__angle_track / 45 * self.speed_limit, 2)
+        # Применяем коэффициент подруливания к соотствующему борту от знака.
         if self.__rotate_coef > 0:
             return (0, abs(self.__rotate_coef))
         else:
@@ -75,101 +90,83 @@ class Robots:
         return -1 if num < 0 else 1
 
 
-    def __find_center(self, itemindex: np.array) -> tuple:
-        '''Расчитываю центры контрольных точек робота'''
+    def find_itself(self, frame) -> bool:
+        '''Нахожу координаты робота в кадре. Двигаю окно roi.'''
         try:
-            y_min = np.min(itemindex[0][:])
-            y_max = np.max(itemindex[0][:])
-            x_min = np.min(itemindex[1][:])
-            x_max = np.max(itemindex[1][:])
-            return (x_min + x_max) // 2, (y_min + y_max) // 2
-        except:
-            return 0, 0
-    
-
-    def __find_keypoints(self, robot_roi: np.array) -> tuple:
-        '''Нахожу ключевые точки робота по цветовым меткам'''
-        # Ищу ключевую точку "головы" по желтой метке
-        img_HSV = cv2.cvtColor(robot_roi, cv2.COLOR_RGB2HSV)
-        lower_yellow = np.array([20, 100, 100])
-        upper_yellow = np.array([40, 255, 255])
-        mask_yellow = cv2.inRange(img_HSV, lower_yellow, upper_yellow)
-        x_head, y_head = self.__find_center(np.where(mask_yellow != 0))
-        # Ищу ключевую точку "хвоста" по синей метке
-        lower_blue = np.array([100, 150, 0])
-        upper_blue = np.array([140, 255, 255])
-        mask_blue = cv2.inRange(img_HSV, lower_blue, upper_blue)
-        x_tail, y_tail = self.__find_center(np.where(mask_blue != 0))
-        return x_head, y_head, x_tail, y_tail
-
-
-    def find_keypoints_vec(self, frame) -> bool:
-        ''''Определяем вектор направления по ключевым точкам'''
-        # Переделать на поиск ключевых точек моделью YOLO keypoints
-        try:
-            # вырезаю робота по ограничительной рамке
-            x, y, w, h = self.__box_coords
-            # ищу ключевые точки по цветовым меткам
-            robot_roi = frame[y-h//2:y+h//2, x-w//2:x+w//2]
-            x_head, y_head, x_tail, y_tail = self.__find_keypoints(robot_roi)
-            x_head = x_head + x - w // 2
-            y_head = y_head + y - h // 2
-            x_tail = x_tail + x - w // 2
-            y_tail = y_tail + y - h // 2
-            self.__keypoints_vec = np.array([[x_head, y_head], [x_tail, y_tail]])
-            return True
+            roi = frame[self.roi[1] : self.roi[1] + 640,
+                        self.roi[0] : self.roi[0] + 640]
+            results = self.model(roi, device=device, verbose=False, imgsz=640, max_det=1)
+            if results:
+                self.__keypoints_vec = results[0].keypoints[0].cpu().numpy().xy[0].astype(dtype='int16')
+                self.__keypoints_vec[0] += self.roi
+                self.__keypoints_vec[1] += self.roi
+                self.__box_coords = results[0].boxes[0].cpu().numpy().xywh[0].astype(dtype='int16')
+                self.__box_coords[0] += self.roi[0]
+                self.__box_coords[1] += self.roi[1]
+                print(self.__box_coords, self.roi[0], self.roi[1], self.__angle_keypoints)
+                if (frame.shape[0] - 320) > self.__box_coords[1] > 320:
+                    self.roi[1] = self.__box_coords[1] - 320
+                elif self.__box_coords[1] < 320:
+                    self.roi[1] = 0
+                elif self.__box_coords[1] >= (frame.shape[0] - 320):
+                    self.roi[1] = frame.shape[0] - 640
+                if (frame.shape[1] - 320) > self.__box_coords[0] > 320:
+                    self.roi[0] = self.__box_coords[0] - 320
+                elif self.__box_coords[0] < 320:
+                    self.roi[0] = 0
+                elif self.__box_coords[0] >= (frame.shape[1] - 320):
+                    self.roi[0] = frame.shape[1] - 640
+                self.__add_history()
+                return roi    # True
         except Exception as e:
             print(e)
-            self.__keypoints_vec = np.array([np.NAN, np.NAN])
-            return False
-
-
-    def find_itself(self, boxes) -> bool:
-        '''Ищем в результатах обработки моделью кадра координаты робота'''
-        # пока ищем по классу 0, потом нужно будет добавить идентификаторы
-        try:
-            robot_box = boxes[boxes.cls==0].cpu().numpy()
-            self.__box_coords = robot_box.xywh[0].astype(dtype='int16')
-            self.__add_history()
-            return True
-        except Exception as e:
-            print(e)
-            return False
+            return None    # False
     
 
     def check_cam(self, frame_size: tuple, cam) -> int:
         '''Проверяем нахождение в пограничной зоне переключения камеры'''
         # Проверяю условие для переключения соответствующей камеры
-        if self.__box_coords[0] < frame_size[1] * 0.05:
-            return 2
-        elif self.__box_coords[0] > (frame_size[1] - frame_size[1] * 0.05):
-            return 1
-        else:
-            return 0
+        pass
 
 
-    def find_way(self, frame, goal_point) -> bool:
+    def check_way(self, goal_point) -> bool:
         '''Определяем маршрут движения до целевой точки'''
-        # Здесь будет обширный блок расчета маршрута минуя препятствия,
-        # но пока это только заготовка для него.
-        # Возвращает False если маршрут построить невозможно, либо
-        # если робот достиг целевой точки
+        # Если появилась контрольная точка (not None)
         if goal_point:
-            if np.linalg.norm(self.__box_coords[0:2] - goal_point) > 20:
-                self.goal_point = np.array(goal_point)
-                return True
+            # Если маршрут "пустой"
+            if np.isnan(self.goal_point[0][0]):
+                # Пытаемся создать маршрут, возвращаем True при успехе
+                return self.create_way(goal_point)
+            # Если маршрут "не пустой"
             else:
-                self.goal_point = np.array([np.NAN, np.NAN])
-                return False
-                
+                # Проверяем достижение текущей [0] контрольной точки
+                if np.linalg.norm(self.__box_coords[0:2] - self.goal_point[0]) < 20:
+                    # В случае достижения, удаляем её
+                    self.goal_point = np.delete(self.goal_point, (0), axis=0)
+                    # Если после удаления не осталось активных точек, возвращаем False
+                    if np.isnan(self.goal_point[0][0]):
+                        return False
+                    # Если активные точки ещё остались, возвращаем True
+                    else:
+                        return True
+                # Пока текущая контрольная точка не достигнута, возвращаем True
+                else:
+                    return True
+    
+
+    def create_way(self, goal_point) -> bool:
+        '''Создаем маршрут (перечень контрольных точек) для следования'''
+        self.goal_point = np.vstack((goal_point, self.goal_point))
+        return True
+
 
     def robot_action(self) -> tuple:
         '''Робот движется по рассчитанному ранее маршруту'''
         # В момент изменения целевой точки поднимаем флаг
         # разворота на месте. Некрасиво, переделать этот блок
-        if not np.array_equal(self.goal_point, self.__history[-1][-2:]):
+        if not np.array_equal(self.goal_point[0], self.__history[-1][-2:]):
                 self.__angle_keypoints = self.__calc_angle(
-                                        self.__keypoints_vec, self.goal_point)
+                                        self.__keypoints_vec, self.goal_point[0])
                 self.__add_history()
                 self.__action = 2
         # Если поднят флаг разворота на месте, разворачиваемся
@@ -182,7 +179,7 @@ class Robots:
     def robot_rotation(self) -> tuple:
         '''Робот разворачивается на месте'''
         self.__angle_keypoints = self.__calc_angle(
-                                        self.__keypoints_vec, self.goal_point)
+                                        self.__keypoints_vec, self.goal_point[0])
         # Смотрим текущий знак угла отклонения от вектора к целевой точке
         sign = self.__calc_sign(self.__angle_keypoints)
         # Если знаки углов текущей и прошлой итерации отличаются,
@@ -191,7 +188,7 @@ class Robots:
         if sign != self.__calc_sign(self.__history[-1][-3]):
             self.__action = 1
         # Скорость разворота замедляется в секторе +-15 градусов от goal_vector
-        rotate_coef = 1 if abs(self.__angle_keypoints) < 15 else self.speed_limit
+        rotate_coef = 1 if abs(self.__angle_keypoints) < 22 else self.speed_limit
         self.leftside_speed = sign * rotate_coef
         self.rightside_speed = sign * rotate_coef
         return self.leftside_speed, self.rightside_speed
@@ -230,14 +227,14 @@ class Robots:
             self.__action,           # Тип активности
             self.__angle_track,      # Угол по движению
             self.__angle_keypoints,
-            self.goal_point[0],      # Координата x целевой точки
-            self.goal_point[1],      # Координата y целевой точки
+            self.goal_point[0][0],      # Координата x целевой точки
+            self.goal_point[0][1],      # Координата y целевой точки
             ]], axis=0)
         # Если строк более 400, убираем первую
-        if len(self.__history) > 400:
+        if len(self.__history) > 10000:
             self.__history = np.delete(self.__history, (0), axis=0)
 
 
     def show_history(self) -> None:
         '''Отображение истории'''
-        print(self.__history)
+        return self.__history
